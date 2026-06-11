@@ -1,0 +1,7 @@
+F:\project\AttendanceGenerator\bin\Release\net8.0-windows\win-x64\publish\AttendanceGenerator.pdb
+F:\project\AttendanceGenerator\bin\Release\net8.0-windows\win-x64\publish\Config\holiday.json
+F:\project\AttendanceGenerator\bin\Release\net8.0-windows\win-x64\publish\Config\mapping.json
+F:\project\AttendanceGenerator\bin\Release\net8.0-windows\win-x64\publish\Config\workCalendar.json
+F:\project\AttendanceGenerator\bin\Release\net8.0-windows\win-x64\publish\Config\考勤统计模板.xlsx
+F:\project\AttendanceGenerator\bin\Release\net8.0-windows\win-x64\publish\Logs\.gitkeep
+F:\project\AttendanceGenerator\bin\Release\net8.0-windows\win-x64\publish\AttendanceGenerator.exe
