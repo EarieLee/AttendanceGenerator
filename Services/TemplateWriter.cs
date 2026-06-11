@@ -295,7 +295,7 @@ public sealed class TemplateWriter
         return value.Any(ch => ch >= '\u4e00' && ch <= '\u9fff');
     }
 
-    private static void RewriteTitleAndDateHeaders(IXLWorksheet sheet, YearMonth month, IReadOnlySet<DateOnly> selectedHolidays, AttendanceLayout layout)
+    private void RewriteTitleAndDateHeaders(IXLWorksheet sheet, YearMonth month, IReadOnlySet<DateOnly> selectedHolidays, AttendanceLayout layout)
     {
         var titleCell = sheet.Cell(1, 1);
         var title = AttendanceReader.CellText(titleCell);
@@ -324,12 +324,12 @@ public sealed class TemplateWriter
         }
     }
 
-    private static string BuildAttendanceTitleSummary(YearMonth month, IReadOnlySet<DateOnly> selectedHolidays)
+    private string BuildAttendanceTitleSummary(YearMonth month, IReadOnlySet<DateOnly> selectedHolidays)
     {
         var days = DateTime.DaysInMonth(month.Year, month.Month);
         var dates = Enumerable.Range(1, days).Select(day => new DateOnly(month.Year, month.Month, day)).ToList();
         var legalDays = dates.Count(selectedHolidays.Contains);
-        var restDays = dates.Count(date => !selectedHolidays.Contains(date) && date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday);
+        var restDays = dates.Count(date => !selectedHolidays.Contains(date) && IsCalendarRestDay(date));
         var workDays = days - legalDays - restDays;
         return $"（出勤{workDays}天 法定{legalDays}天  休{restDays}天 ）";
     }
@@ -542,13 +542,17 @@ public sealed class TemplateWriter
 
         return existing.Contains("中班", StringComparison.Ordinal)
             || existing.Contains("夜班", StringComparison.Ordinal)
-            || existing.Contains("产假", StringComparison.Ordinal)
             || existing.Contains("哺乳", StringComparison.Ordinal)
-            || existing.Contains("年假1天", StringComparison.Ordinal)
             || existing.Contains("请假", StringComparison.Ordinal)
             || existing.Contains("调休", StringComparison.Ordinal)
             || existing.Contains("事假", StringComparison.Ordinal)
-            || existing.Contains("病假", StringComparison.Ordinal);
+            || existing.Contains("年假", StringComparison.Ordinal)
+            || existing.Contains("病假", StringComparison.Ordinal)
+            || existing.Contains("婚假", StringComparison.Ordinal)
+            || existing.Contains("产假", StringComparison.Ordinal)
+            || existing.Contains("丧假", StringComparison.Ordinal)
+            || existing.Contains("陪产假", StringComparison.Ordinal)
+            || existing.Contains("例假", StringComparison.Ordinal);
     }
 
     private static bool IsOutOfEmployment(IXLRow row, AttendanceLayout layout, DateOnly date)
