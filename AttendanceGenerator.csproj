@@ -1,10 +1,11 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFrameworks>net8.0;net8.0-windows</TargetFrameworks>
+    <OutputType Condition="'$(TargetFramework)' == 'net8.0-windows'">WinExe</OutputType>
+    <OutputType Condition="'$(TargetFramework)' != 'net8.0-windows'">Exe</OutputType>
     <Nullable>enable</Nullable>
-    <UseWindowsForms>true</UseWindowsForms>
+    <UseWindowsForms Condition="'$(TargetFramework)' == 'net8.0-windows'">true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
@@ -15,13 +16,18 @@
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
   </ItemGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <Compile Update="UI\MainForm.Designer.cs">
       <DependentUpon>MainForm.cs</DependentUpon>
     </Compile>
     <EmbeddedResource Update="UI\MainForm.resx">
       <DependentUpon>MainForm.cs</DependentUpon>
     </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' != 'net8.0-windows'">
+    <Compile Remove="UI\**\*.cs" />
+    <EmbeddedResource Remove="UI\**\*.resx" />
   </ItemGroup>
 
   <ItemGroup>
