@@ -91,13 +91,13 @@ public sealed class TemplateWriter
                 var date = new DateOnly(month.Year, month.Month, day);
                 var existing = AttendanceReader.CellText(cell);
                 var status = BuildBaselineStatus(date, selectedHolidays);
-                if (IsOutOfEmployment(row, layout, date))
-                {
-                    status = "/";
-                }
-                else if (sameTemplateMonth && IsReusableManualStatus(existing))
+                if (sameTemplateMonth && IsReusableManualStatus(existing))
                 {
                     status = existing;
+                }
+                else if (IsOutOfEmployment(row, layout, date))
+                {
+                    status = "/";
                 }
                 else if (byNameDate.TryGetValue((name, date), out var value))
                 {
@@ -532,7 +532,7 @@ public sealed class TemplateWriter
             return baseline;
         }
 
-        if (source is "迟到" or "早退" or "缺卡")
+        if (source is "迟到" or "早退" or "缺卡" or "旷工")
         {
             return "公司出勤";
         }
@@ -589,13 +589,19 @@ public sealed class TemplateWriter
         }
 
         var start = ParseRemarkDate(remark, "入职", date.Year);
-        var end = ParseRemarkDate(remark, "离职", date.Year) ?? ParseRemarkDate(remark, "自离", date.Year);
+        var end = ParseRemarkDate(remark, "离职", date.Year);
+        var selfLeave = ParseRemarkDate(remark, "自离", date.Year);
         if (start.HasValue && date < start.Value)
         {
             return true;
         }
 
-        if (end.HasValue && date >= end.Value)
+        if (end.HasValue && date > end.Value)
+        {
+            return true;
+        }
+
+        if (selfLeave.HasValue && date >= selfLeave.Value)
         {
             return true;
         }
@@ -705,11 +711,33 @@ public sealed class TemplateWriter
 
     private static void SetStat(IXLRow row, AttendanceLayout layout, string name, decimal value, bool writeZero = false)
     {
-        var column = layout.StatColumns.FirstOrDefault(s => s.Key.Contains(name, StringComparison.Ordinal)).Value;
+        var column = FindStatColumn(layout, name);
         if (column > 0)
         {
             row.Cell(column).Value = value == 0 && !writeZero ? string.Empty : value;
         }
+    }
+
+    private static int FindStatColumn(AttendanceLayout layout, string name)
+    {
+        var exact = layout.StatColumns.FirstOrDefault(s => NormalizeStatHeader(s.Key).Equals(name, StringComparison.Ordinal)).Value;
+        if (exact > 0)
+        {
+            return exact;
+        }
+
+        var startsWith = layout.StatColumns.FirstOrDefault(s => NormalizeStatHeader(s.Key).StartsWith(name, StringComparison.Ordinal)).Value;
+        if (startsWith > 0)
+        {
+            return startsWith;
+        }
+
+        return layout.StatColumns.FirstOrDefault(s => s.Key.Contains(name, StringComparison.Ordinal)).Value;
+    }
+
+    private static string NormalizeStatHeader(string header)
+    {
+        return Regex.Replace(header, @"（.*?）|\s", string.Empty);
     }
 
     private static WorkCalendarSettings LoadWorkCalendar(string? configDirectory)
