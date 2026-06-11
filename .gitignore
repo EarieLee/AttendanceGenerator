@@ -1,0 +1,15 @@
+# Build outputs
+bin/
+obj/
+
+# Visual Studio user/cache files
+.vs/
+*.user
+*.suo
+
+# Logs generated at runtime
+Logs/*.log
+
+# Local test outputs
+out/
+*.tmp
