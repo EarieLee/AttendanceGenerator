@@ -170,11 +170,12 @@ public sealed class TemplateWriter
             var row = sheet.Row(rowNumber);
             var originalName = AttendanceReader.CellText(row.Cell(nameColumn));
             var name = AttendanceRuleEngine.CleanName(originalName);
-            if (string.IsNullOrWhiteSpace(name)
-                || !ContainsChinese(name)
-                || !namesWithRecords.Contains(name)
-                || IsManualOvertimeRow(row)
-                || (preserveExistingRows && HasExistingOvertimeValues(row, dateColumns.Values)))
+            if (string.IsNullOrWhiteSpace(name) || !ContainsChinese(name) || IsOvertimeTotalRow(name))
+            {
+                continue;
+            }
+
+            if (preserveExistingRows && (IsManualOvertimeRow(row) || HasExistingOvertimeValues(row, dateColumns.Values)))
             {
                 continue;
             }
@@ -182,6 +183,11 @@ public sealed class TemplateWriter
             foreach (var col in dateColumns.Values)
             {
                 row.Cell(col).Clear(XLClearOptions.Contents);
+            }
+
+            if (!namesWithRecords.Contains(name))
+            {
+                continue;
             }
 
             for (var day = 1; day <= DateTime.DaysInMonth(month.Year, month.Month); day++)
@@ -207,6 +213,11 @@ public sealed class TemplateWriter
         }
 
         _log($"已写入加班表“{sheet.Name}”：{written} 个单元格。");
+    }
+
+    private static bool IsOvertimeTotalRow(string name)
+    {
+        return name.Contains("合计", StringComparison.Ordinal) || name.Contains("总计", StringComparison.Ordinal);
     }
 
     private static bool IsSameOvertimeMonth(IXLRow headerRow, Dictionary<int, int> dateColumns, YearMonth month)
