@@ -91,13 +91,13 @@ public sealed class TemplateWriter
                 var date = new DateOnly(month.Year, month.Month, day);
                 var existing = AttendanceReader.CellText(cell);
                 var status = BuildBaselineStatus(date, selectedHolidays);
-                if (IsOutOfEmployment(row, layout, date))
-                {
-                    status = "/";
-                }
-                else if (sameTemplateMonth && IsReusableManualStatus(existing))
+                if (sameTemplateMonth && IsReusableManualStatus(existing))
                 {
                     status = existing;
+                }
+                else if (IsOutOfEmployment(row, layout, date))
+                {
+                    status = "/";
                 }
                 else if (byNameDate.TryGetValue((name, date), out var value))
                 {
@@ -295,7 +295,7 @@ public sealed class TemplateWriter
         return value.Any(ch => ch >= '\u4e00' && ch <= '\u9fff');
     }
 
-    private static void RewriteTitleAndDateHeaders(IXLWorksheet sheet, YearMonth month, IReadOnlySet<DateOnly> selectedHolidays, AttendanceLayout layout)
+    private void RewriteTitleAndDateHeaders(IXLWorksheet sheet, YearMonth month, IReadOnlySet<DateOnly> selectedHolidays, AttendanceLayout layout)
     {
         var titleCell = sheet.Cell(1, 1);
         var title = AttendanceReader.CellText(titleCell);
@@ -324,12 +324,12 @@ public sealed class TemplateWriter
         }
     }
 
-    private static string BuildAttendanceTitleSummary(YearMonth month, IReadOnlySet<DateOnly> selectedHolidays)
+    private string BuildAttendanceTitleSummary(YearMonth month, IReadOnlySet<DateOnly> selectedHolidays)
     {
         var days = DateTime.DaysInMonth(month.Year, month.Month);
         var dates = Enumerable.Range(1, days).Select(day => new DateOnly(month.Year, month.Month, day)).ToList();
         var legalDays = dates.Count(selectedHolidays.Contains);
-        var restDays = dates.Count(date => !selectedHolidays.Contains(date) && date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday);
+        var restDays = dates.Count(date => !selectedHolidays.Contains(date) && IsCalendarRestDay(date));
         var workDays = days - legalDays - restDays;
         return $"（出勤{workDays}天 法定{legalDays}天  休{restDays}天 ）";
     }
@@ -428,7 +428,8 @@ public sealed class TemplateWriter
         var restDays = statuses.Count(pair => IsRestDay(month, selectedHolidays, pair.Key, pair.Value));
         var legalDays = statuses.Count(pair => IsLegalDay(month, selectedHolidays, pair.Key, pair.Value));
         var slashWorkdays = statuses.Count(pair => IsSlashWorkday(month, selectedHolidays, pair.Key, pair.Value));
-        var leaveDays = RoundDays(statuses.Values.Sum(LeaveDays) + slashWorkdays);
+        var holidayRestAbsences = statuses.Count(pair => IsHolidayRestAbsence(month, selectedHolidays, pair.Key, pair.Value));
+        var leaveDays = RoundDays(statuses.Values.Sum(LeaveDays) + slashWorkdays + holidayRestAbsences);
         var attendanceDays = RoundDays(total - restDays - legalDays - leaveDays);
 
         SetStat(row, layout, "合计", total);
@@ -436,12 +437,29 @@ public sealed class TemplateWriter
         SetStat(row, layout, "休息", restDays);
         SetStat(row, layout, "法定", legalDays, writeZero: true);
 
+        var approvedCompLeaveDays = IsApprovedCompLeave(row, layout)
+            ? statuses.Values.Sum(v => LeaveDaysForType(v, "调休"))
+            : 0;
+        var unapprovedCompLeaveDays = statuses.Values.Sum(v => LeaveDaysForType(v, "调休")) - approvedCompLeaveDays;
+
         SetStat(row, layout, "请假", leaveDays);
         SetStat(row, layout, "年假", RoundDays(statuses.Values.Sum(v => LeaveDaysForType(v, "年假"))));
-        SetStat(row, layout, "调休", RoundDays(statuses.Values.Sum(v => LeaveDaysForType(v, "调休"))));
+        SetStat(row, layout, "调休", RoundDays(approvedCompLeaveDays));
         SetStat(row, layout, "婚假", RoundDays(statuses.Values.Sum(v => LeaveDaysForType(v, "婚假"))));
         SetStat(row, layout, "产假", RoundDays(statuses.Values.Sum(v => LeaveDaysForType(v, "产假"))));
-        SetStat(row, layout, "扣工资合计", TruncateDays(slashWorkdays + statuses.Values.Sum(DeductibleLeaveDays)), writeZero: true);
+        SetStat(row, layout, "扣工资合计", RoundDays(slashWorkdays + holidayRestAbsences + unapprovedCompLeaveDays + statuses.Values.Sum(DeductibleLeaveDays)), writeZero: true);
+    }
+
+    private static bool IsApprovedCompLeave(IXLRow row, AttendanceLayout layout)
+    {
+        var remarkColumn = layout.StatColumns.FirstOrDefault(s => s.Key.Contains("备注", StringComparison.Ordinal)).Value;
+        if (remarkColumn <= 0)
+        {
+            return false;
+        }
+
+        var remark = AttendanceReader.CellText(row.Cell(remarkColumn));
+        return remark.Contains("调休", StringComparison.Ordinal);
     }
 
     private static void ClearStatistics(IXLRow row, AttendanceLayout layout)
@@ -514,7 +532,7 @@ public sealed class TemplateWriter
             return baseline;
         }
 
-        if (source is "迟到" or "早退" or "缺卡")
+        if (source is "迟到" or "早退" or "缺卡" or "旷工")
         {
             return "公司出勤";
         }
@@ -535,20 +553,25 @@ public sealed class TemplateWriter
             return false;
         }
 
-        if (existing is "/" or "公司出勤" or "休" or "法定" or "迟到" or "早退" or "缺卡" or "旷工")
+        if (existing is "/" or "公司出勤" or "法定" or "迟到" or "早退" or "缺卡" or "旷工")
         {
             return false;
         }
 
-        return existing.Contains("中班", StringComparison.Ordinal)
+        return existing == "休"
+            || existing.Contains("中班", StringComparison.Ordinal)
             || existing.Contains("夜班", StringComparison.Ordinal)
-            || existing.Contains("产假", StringComparison.Ordinal)
             || existing.Contains("哺乳", StringComparison.Ordinal)
-            || existing.Contains("年假1天", StringComparison.Ordinal)
             || existing.Contains("请假", StringComparison.Ordinal)
             || existing.Contains("调休", StringComparison.Ordinal)
             || existing.Contains("事假", StringComparison.Ordinal)
-            || existing.Contains("病假", StringComparison.Ordinal);
+            || existing.Contains("年假", StringComparison.Ordinal)
+            || existing.Contains("病假", StringComparison.Ordinal)
+            || existing.Contains("婚假", StringComparison.Ordinal)
+            || existing.Contains("产假", StringComparison.Ordinal)
+            || existing.Contains("丧假", StringComparison.Ordinal)
+            || existing.Contains("陪产假", StringComparison.Ordinal)
+            || existing.Contains("例假", StringComparison.Ordinal);
     }
 
     private static bool IsOutOfEmployment(IXLRow row, AttendanceLayout layout, DateOnly date)
@@ -566,13 +589,19 @@ public sealed class TemplateWriter
         }
 
         var start = ParseRemarkDate(remark, "入职", date.Year);
-        var end = ParseRemarkDate(remark, "离职", date.Year) ?? ParseRemarkDate(remark, "自离", date.Year);
+        var end = ParseRemarkDate(remark, "离职", date.Year);
+        var selfLeave = ParseRemarkDate(remark, "自离", date.Year);
         if (start.HasValue && date < start.Value)
         {
             return true;
         }
 
-        if (end.HasValue && date >= end.Value)
+        if (end.HasValue && date > end.Value)
+        {
+            return true;
+        }
+
+        if (selfLeave.HasValue && date >= selfLeave.Value)
         {
             return true;
         }
@@ -601,7 +630,14 @@ public sealed class TemplateWriter
     private bool IsRestDay(YearMonth month, IReadOnlySet<DateOnly> selectedHolidays, int day, string status)
     {
         var date = new DateOnly(month.Year, month.Month, day);
-        return status == "休" || (status == "/" && !selectedHolidays.Contains(date) && IsCalendarRestDay(date));
+        return status == "休" && !selectedHolidays.Contains(date)
+            || (status == "/" && !selectedHolidays.Contains(date) && IsCalendarRestDay(date));
+    }
+
+    private static bool IsHolidayRestAbsence(YearMonth month, IReadOnlySet<DateOnly> selectedHolidays, int day, string status)
+    {
+        var date = new DateOnly(month.Year, month.Month, day);
+        return status == "休" && selectedHolidays.Contains(date);
     }
 
     private bool IsSlashWorkday(YearMonth month, IReadOnlySet<DateOnly> selectedHolidays, int day, string status)
@@ -657,7 +693,7 @@ public sealed class TemplateWriter
 
     private static decimal DeductibleLeaveDays(string status)
     {
-        return LeaveDaysForType(status, "请假")
+        return TruncateDays(LeaveDaysForType(status, "请假"))
             + LeaveDaysForType(status, "事假")
             + LeaveDaysForType(status, "病假")
             + (status == "旷工" ? 1 : 0);
@@ -675,11 +711,33 @@ public sealed class TemplateWriter
 
     private static void SetStat(IXLRow row, AttendanceLayout layout, string name, decimal value, bool writeZero = false)
     {
-        var column = layout.StatColumns.FirstOrDefault(s => s.Key.Contains(name, StringComparison.Ordinal)).Value;
+        var column = FindStatColumn(layout, name);
         if (column > 0)
         {
             row.Cell(column).Value = value == 0 && !writeZero ? string.Empty : value;
         }
+    }
+
+    private static int FindStatColumn(AttendanceLayout layout, string name)
+    {
+        var exact = layout.StatColumns.FirstOrDefault(s => NormalizeStatHeader(s.Key).Equals(name, StringComparison.Ordinal)).Value;
+        if (exact > 0)
+        {
+            return exact;
+        }
+
+        var startsWith = layout.StatColumns.FirstOrDefault(s => NormalizeStatHeader(s.Key).StartsWith(name, StringComparison.Ordinal)).Value;
+        if (startsWith > 0)
+        {
+            return startsWith;
+        }
+
+        return layout.StatColumns.FirstOrDefault(s => s.Key.Contains(name, StringComparison.Ordinal)).Value;
+    }
+
+    private static string NormalizeStatHeader(string header)
+    {
+        return Regex.Replace(header, @"（.*?）|\s", string.Empty);
     }
 
     private static WorkCalendarSettings LoadWorkCalendar(string? configDirectory)

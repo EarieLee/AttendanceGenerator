@@ -69,6 +69,23 @@ dotnet restore
 dotnet run --project .\AttendanceGenerator.csproj
 ```
 
+
+## 重新生成/发布说明
+
+仓库不再提交 `bin/`、`obj/` 或 `.vs/` 下的本地构建产物。拉取代码后请重新编译或发布，不要运行旧的 `bin\Release` 或 `publish` 目录中的 exe：
+
+```powershell
+dotnet restore .\AttendanceGenerator.csproj
+dotnet publish .\AttendanceGenerator.csproj -c Release -f net8.0-windows -r win-x64 --self-contained false -p:PublishSingleFile=true
+```
+
+如果需要复核 5 月输出，也可以在 Windows/.NET SDK 环境中使用命令行入口：
+
+```powershell
+dotnet run --project .\AttendanceGenerator.csproj -- generate .\考勤报表.xlsx .\加班表.xlsx 2026-05 .\out 2026-05-01,2026-05-02 .\Config\考勤统计模板.xlsx
+dotnet run --project .\AttendanceGenerator.csproj -- compare .\out\2026年05月考勤统计表_生成版.xlsx .\5月手工做的.xlsx
+```
+
 ## 打包为 exe
 
 框架依赖发布：
