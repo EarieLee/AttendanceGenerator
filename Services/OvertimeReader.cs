@@ -33,13 +33,17 @@ public sealed class OvertimeReader
             }
 
             var headers = AttendanceReader.BuildHeaderMap(headerRow);
-            var nameCol = AttendanceReader.FindHeader(headers, "发起人姓名", "加班人", "姓名");
-            var dateCol = AttendanceReader.FindHeader(headers, "开始时间", "加班时间");
-            var hoursCol = AttendanceReader.FindHeader(headers, "时长");
+            var nameCol = AttendanceReader.FindHeader(headers, "发起人姓名", "姓名");
+            var detailNameCol = AttendanceReader.FindHeader(headers, "加班人");
+            var mainDateCol = AttendanceReader.FindHeader(headers, "开始时间");
+            var mainEndDateCol = AttendanceReader.FindHeader(headers, "结束时间");
+            var mainHoursCol = AttendanceReader.FindHeader(headers, "时长");
+            var detailDateCol = AttendanceReader.FindHeader(headers, "加班时间");
+            var detailHoursCol = detailDateCol > 0 && detailDateCol != mainDateCol ? detailDateCol + 1 : 0;
             var typeCol = AttendanceReader.FindHeader(headers, "加班类型", "是否法定假日", "加班补偿");
             var resultCol = AttendanceReader.FindHeader(headers, "审批结果");
 
-            if (nameCol == 0 || dateCol == 0 || hoursCol == 0)
+            if (nameCol == 0 || (mainDateCol == 0 && detailDateCol == 0) || (mainHoursCol == 0 && detailHoursCol == 0))
             {
                 exceptions.Add(new AttendanceException
                 {
@@ -63,9 +67,8 @@ public sealed class OvertimeReader
                     continue;
                 }
 
-                var name = AttendanceRuleEngine.CleanName(AttendanceReader.CellText(row.Cell(nameCol)));
-                var date = AttendanceReader.TryGetDate(row.Cell(dateCol));
-                var hours = TryGetDecimal(row.Cell(hoursCol));
+                var name = AttendanceRuleEngine.CleanName(GetOvertimeName(row, nameCol, detailNameCol));
+                var (date, hours) = GetOvertimeDateAndHours(row, mainDateCol, mainEndDateCol, mainHoursCol, detailDateCol, detailHoursCol);
                 if (string.IsNullOrWhiteSpace(name) || date == null || hours <= 0)
                 {
                     continue;
@@ -92,6 +95,92 @@ public sealed class OvertimeReader
 
         _log($"加班记录读取完成：{records.Count} 条。");
         return records;
+    }
+
+    private static string GetOvertimeName(IXLRow row, int nameCol, int detailNameCol)
+    {
+        if (detailNameCol > 0)
+        {
+            var detailName = AttendanceReader.CellText(row.Cell(detailNameCol));
+            if (!string.IsNullOrWhiteSpace(detailName))
+            {
+                return detailName;
+            }
+        }
+
+        return AttendanceReader.CellText(row.Cell(nameCol));
+    }
+
+    private static (DateOnly? Date, decimal Hours) GetOvertimeDateAndHours(IXLRow row, int mainDateCol, int mainEndDateCol, int mainHoursCol, int detailDateCol, int detailHoursCol)
+    {
+        if (detailDateCol > 0 && detailHoursCol > 0)
+        {
+            var detailDate = AttendanceReader.TryGetDate(row.Cell(detailDateCol));
+            if (detailDate.HasValue)
+            {
+                return (detailDate, TryGetDecimal(row.Cell(detailHoursCol)));
+            }
+        }
+
+        var mainStart = mainDateCol > 0 ? TryGetDateTime(row.Cell(mainDateCol)) : null;
+        var mainEnd = mainEndDateCol > 0 ? TryGetDateTime(row.Cell(mainEndDateCol)) : null;
+        var mainDate = AdjustMainOvertimeDate(mainStart, mainEnd);
+        var mainHours = mainHoursCol > 0 ? TryGetDecimal(row.Cell(mainHoursCol)) : 0;
+        return (mainDate, mainHours);
+    }
+
+    private static DateOnly? AdjustMainOvertimeDate(DateTime? start, DateTime? end)
+    {
+        if (!start.HasValue)
+        {
+            return null;
+        }
+
+        var date = DateOnly.FromDateTime(start.Value);
+        if (start.Value.TimeOfDay < TimeSpan.FromHours(7))
+        {
+            return date.AddDays(-1);
+        }
+
+        if (end.HasValue
+            && DateOnly.FromDateTime(end.Value) > date
+            && end.Value.TimeOfDay <= TimeSpan.FromMinutes(90))
+        {
+            return DateOnly.FromDateTime(end.Value);
+        }
+
+        return date;
+    }
+
+    private static DateTime? TryGetDateTime(IXLCell cell)
+    {
+        if (cell.IsEmpty())
+        {
+            return null;
+        }
+
+        if (cell.DataType == XLDataType.DateTime)
+        {
+            return cell.GetDateTime();
+        }
+
+        if (cell.DataType == XLDataType.Number)
+        {
+            try
+            {
+                return DateTime.FromOADate(cell.GetDouble());
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        var text = AttendanceReader.CellText(cell);
+        return DateTime.TryParse(text, CultureInfo.CurrentCulture, DateTimeStyles.None, out var value)
+            || DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out value)
+            ? value
+            : null;
     }
 
     private static decimal TryGetDecimal(IXLCell cell)

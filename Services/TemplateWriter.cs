@@ -154,11 +154,15 @@ public sealed class TemplateWriter
             return;
         }
 
+        var preserveExistingRows = IsSameOvertimeMonth(headerRow, dateColumns, month);
         RewriteOvertimeDateHeaders(sheet, headerRow, dateColumns, month);
         var nameColumn = Math.Max(1, dateColumns.Values.Min() - 1);
         var byNameDate = records
             .GroupBy(r => (AttendanceRuleEngine.CleanName(r.Name), r.Date))
             .ToDictionary(g => g.Key, g => g.Sum(r => r.Hours));
+        var namesWithRecords = byNameDate.Keys
+            .Select(k => k.Item1)
+            .ToHashSet(StringComparer.Ordinal);
 
         var written = 0;
         for (var rowNumber = headerRow.RowNumber() + 1; rowNumber <= used.LastRow().RowNumber(); rowNumber++)
@@ -166,7 +170,11 @@ public sealed class TemplateWriter
             var row = sheet.Row(rowNumber);
             var originalName = AttendanceReader.CellText(row.Cell(nameColumn));
             var name = AttendanceRuleEngine.CleanName(originalName);
-            if (string.IsNullOrWhiteSpace(name) || !ContainsChinese(name))
+            if (string.IsNullOrWhiteSpace(name)
+                || !ContainsChinese(name)
+                || !namesWithRecords.Contains(name)
+                || IsManualOvertimeRow(row)
+                || (preserveExistingRows && HasExistingOvertimeValues(row, dateColumns.Values)))
             {
                 continue;
             }
@@ -199,6 +207,25 @@ public sealed class TemplateWriter
         }
 
         _log($"已写入加班表“{sheet.Name}”：{written} 个单元格。");
+    }
+
+    private static bool IsSameOvertimeMonth(IXLRow headerRow, Dictionary<int, int> dateColumns, YearMonth month)
+    {
+        return dateColumns.Values
+            .Select(col => AttendanceReader.TryGetDate(headerRow.Cell(col)))
+            .Any(date => date.HasValue && date.Value.Year == month.Year && date.Value.Month == month.Month);
+    }
+
+    private static bool HasExistingOvertimeValues(IXLRow row, IEnumerable<int> dateColumns)
+    {
+        return dateColumns.Any(col => !string.IsNullOrWhiteSpace(AttendanceReader.CellText(row.Cell(col))));
+    }
+
+    private static bool IsManualOvertimeRow(IXLRow row)
+    {
+        var standardText = AttendanceReader.CellText(row.Cell(34));
+        return decimal.TryParse(standardText, NumberStyles.Any, CultureInfo.CurrentCulture, out var standard)
+            && Math.Abs(standard - 21.72m) < 0.005m;
     }
 
     private static IXLWorksheet? FindAttendanceSheet(XLWorkbook workbook, YearMonth month)
