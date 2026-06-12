@@ -47,8 +47,6 @@ public sealed class TemplateWriter
     {
         var sheet = FindAttendanceSheet(workbook, month)
             ?? throw new InvalidOperationException("模板中未找到考勤统计表 Sheet。");
-        var templateMonth = DetectTemplateMonth(sheet);
-        var sameTemplateMonth = templateMonth == null || templateMonth.Value == month.Month;
         var layout = DetectAttendanceLayout(sheet)
             ?? throw new InvalidOperationException($"Sheet“{sheet.Name}”无法自动识别姓名列、部门列或日期列。");
 
@@ -89,13 +87,8 @@ public sealed class TemplateWriter
                 }
 
                 var date = new DateOnly(month.Year, month.Month, day);
-                var existing = AttendanceReader.CellText(cell);
                 var status = BuildBaselineStatus(date, selectedHolidays);
-                if (sameTemplateMonth && IsReusableManualStatus(existing))
-                {
-                    status = existing;
-                }
-                else if (IsOutOfEmployment(row, layout, date))
+                if (IsOutOfEmployment(row, layout, date))
                 {
                     status = "/";
                 }
@@ -154,7 +147,6 @@ public sealed class TemplateWriter
             return;
         }
 
-        var preserveExistingRows = IsSameOvertimeMonth(headerRow, dateColumns, month);
         RewriteOvertimeDateHeaders(sheet, headerRow, dateColumns, month);
         var nameColumn = Math.Max(1, dateColumns.Values.Min() - 1);
         var byNameDate = records
@@ -171,11 +163,6 @@ public sealed class TemplateWriter
             var originalName = AttendanceReader.CellText(row.Cell(nameColumn));
             var name = AttendanceRuleEngine.CleanName(originalName);
             if (string.IsNullOrWhiteSpace(name) || !ContainsChinese(name) || IsOvertimeTotalRow(name))
-            {
-                continue;
-            }
-
-            if (preserveExistingRows && (IsManualOvertimeRow(row) || HasExistingOvertimeValues(row, dateColumns.Values)))
             {
                 continue;
             }
@@ -220,33 +207,21 @@ public sealed class TemplateWriter
         return name.Contains("合计", StringComparison.Ordinal) || name.Contains("总计", StringComparison.Ordinal);
     }
 
-    private static bool IsSameOvertimeMonth(IXLRow headerRow, Dictionary<int, int> dateColumns, YearMonth month)
-    {
-        return dateColumns.Values
-            .Select(col => AttendanceReader.TryGetDate(headerRow.Cell(col)))
-            .Any(date => date.HasValue && date.Value.Year == month.Year && date.Value.Month == month.Month);
-    }
-
-    private static bool HasExistingOvertimeValues(IXLRow row, IEnumerable<int> dateColumns)
-    {
-        return dateColumns.Any(col => !string.IsNullOrWhiteSpace(AttendanceReader.CellText(row.Cell(col))));
-    }
-
-    private static bool IsManualOvertimeRow(IXLRow row)
-    {
-        var standardText = AttendanceReader.CellText(row.Cell(34));
-        return decimal.TryParse(standardText, NumberStyles.Any, CultureInfo.CurrentCulture, out var standard)
-            && Math.Abs(standard - 21.72m) < 0.005m;
-    }
-
     private static IXLWorksheet? FindAttendanceSheet(XLWorkbook workbook, YearMonth month)
     {
         var monthText = $"{month.Month}月";
         return workbook.Worksheets.FirstOrDefault(ws => ws.Name.Contains(monthText, StringComparison.Ordinal)
                 && ws.Name.Contains("考勤统计", StringComparison.Ordinal))
-            ?? workbook.Worksheets.FirstOrDefault(ws => ws.Name.Contains("5月", StringComparison.Ordinal)
-                && ws.Name.Contains("考勤统计", StringComparison.Ordinal))
-            ?? workbook.Worksheets.FirstOrDefault(ws => ws.Name.Contains("考勤统计", StringComparison.Ordinal));
+            ?? workbook.Worksheets
+                .Where(ws => ws.Name.Contains("考勤统计", StringComparison.Ordinal))
+                .OrderByDescending(UsedCellCount)
+                .FirstOrDefault();
+    }
+
+    private static int UsedCellCount(IXLWorksheet worksheet)
+    {
+        var used = worksheet.RangeUsed();
+        return used == null ? 0 : used.RowCount() * used.ColumnCount();
     }
 
     private static void RemoveOtherAttendanceSheets(XLWorkbook workbook, IXLWorksheet keptSheet)
@@ -370,13 +345,6 @@ public sealed class TemplateWriter
         var restDays = dates.Count(date => !selectedHolidays.Contains(date) && IsCalendarRestDay(date));
         var workDays = days - legalDays - restDays;
         return $"（出勤{workDays}天 法定{legalDays}天  休{restDays}天 ）";
-    }
-
-    private static int? DetectTemplateMonth(IXLWorksheet sheet)
-    {
-        var text = $"{sheet.Name} {AttendanceReader.CellText(sheet.Cell(1, 1))}";
-        var match = Regex.Match(text, @"(?<month>\d{1,2})月");
-        return match.Success ? int.Parse(match.Groups["month"].Value, CultureInfo.InvariantCulture) : null;
     }
 
     private static void RenameWorksheet(IXLWorksheet sheet, string desiredName)
@@ -582,34 +550,6 @@ public sealed class TemplateWriter
         }
 
         return source;
-    }
-
-    private static bool IsReusableManualStatus(string existing)
-    {
-        if (string.IsNullOrWhiteSpace(existing))
-        {
-            return false;
-        }
-
-        if (existing is "/" or "公司出勤" or "法定" or "迟到" or "早退" or "缺卡" or "旷工")
-        {
-            return false;
-        }
-
-        return existing == "休"
-            || existing.Contains("中班", StringComparison.Ordinal)
-            || existing.Contains("夜班", StringComparison.Ordinal)
-            || existing.Contains("哺乳", StringComparison.Ordinal)
-            || existing.Contains("请假", StringComparison.Ordinal)
-            || existing.Contains("调休", StringComparison.Ordinal)
-            || existing.Contains("事假", StringComparison.Ordinal)
-            || existing.Contains("年假", StringComparison.Ordinal)
-            || existing.Contains("病假", StringComparison.Ordinal)
-            || existing.Contains("婚假", StringComparison.Ordinal)
-            || existing.Contains("产假", StringComparison.Ordinal)
-            || existing.Contains("丧假", StringComparison.Ordinal)
-            || existing.Contains("陪产假", StringComparison.Ordinal)
-            || existing.Contains("例假", StringComparison.Ordinal);
     }
 
     private static bool IsOutOfEmployment(IXLRow row, AttendanceLayout layout, DateOnly date)
