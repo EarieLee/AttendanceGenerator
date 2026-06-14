@@ -88,11 +88,11 @@ internal static class CommandLineRunner
     private static int Usage(Action<string> log)
     {
         log("用法：");
-        log("  generate <考勤报表.xlsx> <加班表.xlsx> <yyyy-MM> <输出目录> [法定日期逗号分隔] [模板路径]");
-        log("  compare <生成文件.xlsx> <手工原件.xlsx>");
+        log("  generate <考勤报表.xlsx> <加班表.xlsx> <yyyy-MM> <输出目录> [法定日期逗号分隔]");
+        log("  compare <生成文件.xlsx> <对照文件.xlsx>");
         log("示例：");
-        log("  generate 考勤报表.xlsx 加班表.xlsx 2026-05 ./out 2026-05-01,2026-05-02 Config/考勤统计模板.xlsx");
-        log("  compare ./out/2026年05月考勤统计表_生成版.xlsx 5月手工做的.xlsx");
+        log("  generate 考勤报表.xlsx 加班表.xlsx 2026-05 ./out 2026-05-01,2026-05-02");
+        log("  compare ./out/2026年05月考勤统计表_生成版.xlsx ./对照.xlsx");
         return 1;
     }
 

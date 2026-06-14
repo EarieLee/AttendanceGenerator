@@ -32,12 +32,9 @@ public sealed class GenerationService
             ?? AttendanceRuleEngine.GetDefaultHolidayCandidates(month.Year)
                 .Where(date => date.Year == month.Year && date.Month == month.Month)
                 .ToHashSet();
-        templatePath = ResolveTemplatePath(templatePath, attendancePath, overtimePath, outputDirectory);
-        if (!string.IsNullOrWhiteSpace(templatePath))
-        {
-            ValidateFile(templatePath, "模板文件");
-        }
-        var outputPath = Path.Combine(outputDirectory, $"{month.Year}年{month.Month:D2}月考勤统计表_生成版.xlsx");
+        templatePath = string.IsNullOrWhiteSpace(templatePath) ? null : templatePath;
+        var desiredOutputPath = Path.Combine(outputDirectory, $"{month.Year}年{month.Month:D2}月考勤统计表_生成版.xlsx");
+        var outputPath = GetWritableOutputPath(desiredOutputPath);
         var appDirectory = AppContext.BaseDirectory;
         var configDirectory = Path.Combine(appDirectory, "Config");
         var logDirectory = Path.Combine(appDirectory, "Logs");
@@ -53,6 +50,11 @@ public sealed class GenerationService
         }
 
         LogAll("开始生成考勤统计表。");
+        if (!outputPath.Equals(desiredOutputPath, StringComparison.OrdinalIgnoreCase))
+        {
+            LogAll($"目标文件正在被占用，已改用新文件名：{outputPath}");
+        }
+
         var exceptions = new List<AttendanceException>();
         var ruleEngine = new AttendanceRuleEngine(configDirectory, LogAll, effectiveHolidays);
         var attendanceReader = new AttendanceReader(ruleEngine, LogAll);
@@ -66,60 +68,35 @@ public sealed class GenerationService
         return outputPath;
     }
 
-    private static string? ResolveTemplatePath(string? templatePath, string attendancePath, string overtimePath, string outputDirectory)
+    private static string GetWritableOutputPath(string desiredPath)
     {
-        if (!string.IsNullOrWhiteSpace(templatePath))
+        if (!File.Exists(desiredPath))
         {
-            return templatePath;
+            return desiredPath;
         }
 
-        var searchDirectories = new[]
+        try
         {
-            outputDirectory,
-            Path.GetDirectoryName(attendancePath),
-            Path.GetDirectoryName(overtimePath),
-            AppContext.BaseDirectory,
-            Environment.CurrentDirectory
+            File.SetAttributes(desiredPath, FileAttributes.Normal);
+            using var stream = File.Open(desiredPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            return desiredPath;
         }
-        .Where(p => !string.IsNullOrWhiteSpace(p) && Directory.Exists(p))
-        .Distinct(StringComparer.OrdinalIgnoreCase)
-        .ToList();
-
-        var fixedTemplate = Path.Combine(AppContext.BaseDirectory, "Config", "考勤统计模板.xlsx");
-        if (File.Exists(fixedTemplate))
+        catch (IOException)
         {
-            return fixedTemplate;
+            return WithTimestampSuffix(desiredPath);
         }
-
-        var preferredNames = new[] { "考勤统计模板.xlsx", "AttendanceTemplate.xlsx" };
-        foreach (var directory in searchDirectories)
+        catch (UnauthorizedAccessException)
         {
-            foreach (var name in preferredNames)
-            {
-                var candidate = Path.Combine(directory!, name);
-                if (File.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
+            return WithTimestampSuffix(desiredPath);
         }
+    }
 
-        foreach (var directory in searchDirectories)
-        {
-            var candidate = Directory.EnumerateFiles(directory!, "*.xlsx")
-                .Where(p => Path.GetFileName(p).Contains("考勤统计表", StringComparison.Ordinal)
-                    || Path.GetFileName(p).Contains("考勤统计模板", StringComparison.Ordinal))
-                .Where(p => !Path.GetFileName(p).Contains("生成版", StringComparison.Ordinal)
-                    && !Path.GetFileName(p).Contains("微测检测_考勤报表", StringComparison.Ordinal))
-                .OrderByDescending(File.GetLastWriteTime)
-                .FirstOrDefault();
-            if (candidate != null)
-            {
-                return candidate;
-            }
-        }
-
-        return null;
+    private static string WithTimestampSuffix(string path)
+    {
+        var directory = Path.GetDirectoryName(path) ?? Environment.CurrentDirectory;
+        var name = Path.GetFileNameWithoutExtension(path);
+        var extension = Path.GetExtension(path);
+        return Path.Combine(directory, $"{name}_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
     }
 
     private static void ValidateFile(string path, string displayName)

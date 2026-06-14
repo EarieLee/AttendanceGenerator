@@ -3,9 +3,6 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ClosedXML.Excel;
-using DocumentFormat.OpenXml;
-using DocumentFormat.OpenXml.Packaging;
-using DocumentFormat.OpenXml.Spreadsheet;
 using AttendanceGenerator.Models;
 
 namespace AttendanceGenerator.Services;
@@ -14,6 +11,9 @@ public sealed class TemplateWriter
 {
     private readonly Action<string> _log;
     private readonly WorkCalendarSettings _workCalendar;
+
+    private sealed record EmployeeTemplateRow(string Name, string Department, string Remark);
+    private sealed record OvertimeTemplateRow(string Name, decimal Standard);
 
     public TemplateWriter(Action<string>? log = null, string? configDirectory = null)
     {
@@ -31,7 +31,6 @@ public sealed class TemplateWriter
         IReadOnlyList<AttendanceException> exceptions)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-        var referencePath = ResolveReferencePath(templatePath, month, outputPath);
         using (var workbook = CreateWorkbook(templatePath, outputPath, month, selectedHolidays, attendanceRecords, overtimeRecords))
         {
             WriteAttendance(workbook, month, selectedHolidays, attendanceRecords, exceptions);
@@ -41,11 +40,6 @@ public sealed class TemplateWriter
             workbook.CalculateMode = XLCalculateMode.Auto;
             workbook.RecalculateAllFormulas();
             workbook.Save();
-        }
-
-        if (!string.IsNullOrWhiteSpace(referencePath))
-        {
-            ApplyReferenceFormatting(referencePath, outputPath, month);
         }
 
         _log("Excel 生成完成。");
@@ -60,363 +54,12 @@ public sealed class TemplateWriter
         IReadOnlyList<OvertimeRecord> overtimeRecords)
     {
         var workbook = new XLWorkbook();
-        if (!string.IsNullOrWhiteSpace(templatePath))
-        {
-            BuildWorkbookFromReference(workbook, templatePath, month);
-            workbook.SaveAs(outputPath);
-            _log($"已按参考文件用代码生成模板到输出文件：{outputPath}");
-            return workbook;
-        }
-
-        var referencePath = FindReferenceWorkbook(month, outputPath);
-        if (referencePath != null)
-        {
-            if (File.Exists(outputPath))
-            {
-                File.SetAttributes(outputPath, FileAttributes.Normal);
-            }
-
-            BuildWorkbookFromReference(workbook, referencePath, month);
-            workbook.SaveAs(outputPath);
-            _log($"已读取手工参考表并用代码重建样式和行顺序：{referencePath}");
-            return workbook;
-        }
-        else
-        {
-            BuildAttendanceTemplate(workbook, month, selectedHolidays, attendanceRecords);
-            BuildOvertimeTemplate(workbook, month, overtimeRecords);
-            BuildNightShiftTemplate(workbook, month);
-        }
+        BuildAttendanceTemplate(workbook, month, selectedHolidays, attendanceRecords);
+        BuildOvertimeTemplate(workbook, month, overtimeRecords);
+        BuildNightShiftTemplate(workbook, month, attendanceRecords);
         workbook.SaveAs(outputPath);
         _log($"已用代码生成模板到输出文件：{outputPath}");
         return workbook;
-    }
-
-    private static string? FindReferenceWorkbook(YearMonth month, string outputPath)
-    {
-        var outputDirectory = Path.GetDirectoryName(outputPath);
-        var searchDirectories = new[]
-        {
-            Environment.CurrentDirectory,
-            outputDirectory,
-            outputDirectory == null ? null : Directory.GetParent(outputDirectory)?.FullName
-        }
-        .Where(path => !string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
-        .Distinct(StringComparer.OrdinalIgnoreCase);
-
-        var preferredNames = new[]
-        {
-            $"{month.Month}月手工做的.xlsx",
-            $"{month.Month:D2}月手工做的.xlsx"
-        };
-        foreach (var directory in searchDirectories)
-        {
-            foreach (var name in preferredNames)
-            {
-                var candidate = Path.Combine(directory!, name);
-                if (File.Exists(candidate) && !Path.GetFullPath(candidate).Equals(Path.GetFullPath(outputPath), StringComparison.OrdinalIgnoreCase))
-                {
-                    return candidate;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static string? ResolveReferencePath(string? templatePath, YearMonth month, string outputPath)
-    {
-        return !string.IsNullOrWhiteSpace(templatePath)
-            ? templatePath
-            : FindReferenceWorkbook(month, outputPath);
-    }
-
-    private static void BuildWorkbookFromReference(XLWorkbook target, string referencePath, YearMonth month)
-    {
-        using var reference = new XLWorkbook(referencePath);
-        CopyReferenceWorksheet(reference, target, FindAttendanceSheet(reference, month), $"{month.Month}月考勤统计表 ");
-        CopyReferenceWorksheet(reference, target, reference.Worksheets.FirstOrDefault(ws => ws.Name.Contains("加班", StringComparison.Ordinal)), "加班补贴表 ");
-        CopyReferenceWorksheet(reference, target, reference.Worksheets.FirstOrDefault(ws => ws.Name.Contains("夜班", StringComparison.Ordinal)), "夜班补贴");
-    }
-
-    private static void CopyReferenceWorksheet(XLWorkbook sourceWorkbook, XLWorkbook targetWorkbook, IXLWorksheet? sourceSheet, string targetName)
-    {
-        if (sourceSheet == null)
-        {
-            targetWorkbook.Worksheets.Add(targetName);
-            return;
-        }
-
-        var targetSheet = targetWorkbook.Worksheets.Add(targetName);
-        var used = sourceSheet.RangeUsed();
-        if (used == null)
-        {
-            return;
-        }
-
-        var lastColumn = Math.Max(used.LastColumn().ColumnNumber(), 100);
-        var lastRow = Math.Max(used.LastRow().RowNumber(), 300);
-        for (var col = 1; col <= lastColumn; col++)
-        {
-            targetSheet.Column(col).Width = sourceSheet.Column(col).Width;
-        }
-
-        for (var row = 1; row <= lastRow; row++)
-        {
-            targetSheet.Row(row).Height = sourceSheet.Row(row).Height;
-        }
-
-        foreach (var merged in sourceSheet.MergedRanges)
-        {
-            var address = merged.RangeAddress.ToString();
-            if (!string.IsNullOrWhiteSpace(address))
-            {
-                targetSheet.Range(address).Merge();
-            }
-        }
-
-        for (var row = 1; row <= used.LastRow().RowNumber(); row++)
-        {
-            for (var col = 1; col <= used.LastColumn().ColumnNumber(); col++)
-            {
-                var sourceCell = sourceSheet.Cell(row, col);
-                var targetCell = targetSheet.Cell(row, col);
-                targetCell.Style = sourceCell.Style;
-                if (sourceCell.HasFormula)
-                {
-                    targetCell.FormulaA1 = sourceCell.FormulaA1;
-                }
-                else
-                {
-                    targetCell.Value = sourceCell.Value;
-                }
-            }
-        }
-
-        targetSheet.SheetView.FreezeRows(sourceSheet.SheetView.SplitRow);
-        targetSheet.SheetView.FreezeColumns(sourceSheet.SheetView.SplitColumn);
-    }
-
-    private static void ApplyReferenceFormatting(string referencePath, string outputPath, YearMonth month)
-    {
-        if (!File.Exists(referencePath) || !File.Exists(outputPath))
-        {
-            return;
-        }
-
-        if (Path.GetFullPath(referencePath).Equals(Path.GetFullPath(outputPath), StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        using var source = SpreadsheetDocument.Open(referencePath, false);
-        using var target = SpreadsheetDocument.Open(outputPath, true);
-        var sourceWorkbook = source.WorkbookPart;
-        var targetWorkbook = target.WorkbookPart;
-        if (sourceWorkbook == null || targetWorkbook == null)
-        {
-            return;
-        }
-
-        CopyWorkbookStyles(sourceWorkbook, targetWorkbook);
-        SyncSheetFormatting(sourceWorkbook, targetWorkbook,
-            name => name.Contains($"{month.Month}月", StringComparison.Ordinal) && name.Contains("考勤统计", StringComparison.Ordinal),
-            name => name.Contains($"{month.Month}月", StringComparison.Ordinal) && name.Contains("考勤统计", StringComparison.Ordinal));
-        SyncSheetFormatting(sourceWorkbook, targetWorkbook,
-            name => name.Contains("加班", StringComparison.Ordinal),
-            name => name.Contains("加班", StringComparison.Ordinal));
-        SyncSheetFormatting(sourceWorkbook, targetWorkbook,
-            name => name.Contains("夜班", StringComparison.Ordinal),
-            name => name.Contains("夜班", StringComparison.Ordinal));
-    }
-
-    private static void CopyWorkbookStyles(WorkbookPart sourceWorkbook, WorkbookPart targetWorkbook)
-    {
-        if (sourceWorkbook.WorkbookStylesPart != null)
-        {
-            var targetStyles = targetWorkbook.WorkbookStylesPart ?? targetWorkbook.AddNewPart<WorkbookStylesPart>();
-            using var stream = sourceWorkbook.WorkbookStylesPart.GetStream(FileMode.Open, FileAccess.Read);
-            targetStyles.FeedData(stream);
-        }
-
-        if (sourceWorkbook.ThemePart != null)
-        {
-            var targetTheme = targetWorkbook.ThemePart ?? targetWorkbook.AddNewPart<ThemePart>();
-            using var stream = sourceWorkbook.ThemePart.GetStream(FileMode.Open, FileAccess.Read);
-            targetTheme.FeedData(stream);
-        }
-    }
-
-    private static void SyncSheetFormatting(
-        WorkbookPart sourceWorkbook,
-        WorkbookPart targetWorkbook,
-        Func<string, bool> sourcePredicate,
-        Func<string, bool> targetPredicate)
-    {
-        var sourcePart = FindWorksheetPart(sourceWorkbook, sourcePredicate);
-        var targetPart = FindWorksheetPart(targetWorkbook, targetPredicate);
-        if (sourcePart == null || targetPart == null)
-        {
-            return;
-        }
-
-        var sourceWorksheet = sourcePart.Worksheet;
-        var targetWorksheet = targetPart.Worksheet;
-        ReplaceWorksheetChild<SheetViews>(targetWorksheet, sourceWorksheet.GetFirstChild<SheetViews>()?.CloneNode(true));
-        ReplaceWorksheetChild<SheetFormatProperties>(targetWorksheet, sourceWorksheet.GetFirstChild<SheetFormatProperties>()?.CloneNode(true));
-        ReplaceColumns(targetWorksheet, sourceWorksheet.GetFirstChild<Columns>()?.CloneNode(true));
-        ReplaceMergeCells(targetWorksheet, sourceWorksheet.GetFirstChild<MergeCells>()?.CloneNode(true));
-        SyncRowsAndCellStyles(sourceWorksheet, targetWorksheet);
-        targetWorksheet.Save();
-    }
-
-    private static WorksheetPart? FindWorksheetPart(WorkbookPart workbookPart, Func<string, bool> predicate)
-    {
-        var sheet = workbookPart.Workbook.Sheets?.Elements<Sheet>()
-            .FirstOrDefault(item => predicate(item.Name?.Value ?? string.Empty));
-        return sheet?.Id?.Value == null ? null : workbookPart.GetPartById(sheet.Id.Value) as WorksheetPart;
-    }
-
-    private static void ReplaceWorksheetChild<T>(Worksheet targetWorksheet, OpenXmlElement? sourceChild)
-        where T : OpenXmlElement
-    {
-        targetWorksheet.GetFirstChild<T>()?.Remove();
-        if (sourceChild == null)
-        {
-            return;
-        }
-
-        var sheetData = targetWorksheet.GetFirstChild<SheetData>();
-        if (sheetData != null && sourceChild is Columns)
-        {
-            targetWorksheet.InsertBefore(sourceChild, sheetData);
-            return;
-        }
-
-        if (sheetData != null && sourceChild is MergeCells)
-        {
-            targetWorksheet.InsertAfter(sourceChild, sheetData);
-            return;
-        }
-
-        if (sheetData != null)
-        {
-            targetWorksheet.InsertBefore(sourceChild, sheetData);
-        }
-        else
-        {
-            targetWorksheet.Append(sourceChild);
-        }
-    }
-
-    private static void ReplaceColumns(Worksheet targetWorksheet, OpenXmlElement? sourceColumns)
-    {
-        ReplaceWorksheetChild<Columns>(targetWorksheet, sourceColumns);
-    }
-
-    private static void ReplaceMergeCells(Worksheet targetWorksheet, OpenXmlElement? sourceMergeCells)
-    {
-        ReplaceWorksheetChild<MergeCells>(targetWorksheet, sourceMergeCells);
-    }
-
-    private static void SyncRowsAndCellStyles(Worksheet sourceWorksheet, Worksheet targetWorksheet)
-    {
-        var sourceRows = sourceWorksheet.Descendants<Row>()
-            .Where(row => row.RowIndex?.Value != null)
-            .ToDictionary(row => row.RowIndex!.Value);
-        var targetSheetData = targetWorksheet.GetFirstChild<SheetData>();
-        if (targetSheetData == null)
-        {
-            return;
-        }
-
-        foreach (var targetRow in targetSheetData.Elements<Row>())
-        {
-            targetRow.Height = null;
-            targetRow.CustomHeight = null;
-            targetRow.StyleIndex = null;
-            targetRow.CustomFormat = null;
-        }
-
-        foreach (var pair in sourceRows)
-        {
-            var targetRow = GetOrCreateRow(targetSheetData, pair.Key);
-            CopyRowFormatting(pair.Value, targetRow);
-            foreach (var sourceCell in pair.Value.Elements<Cell>())
-            {
-                if (string.IsNullOrWhiteSpace(sourceCell.CellReference?.Value))
-                {
-                    continue;
-                }
-
-                var targetCell = GetOrCreateCell(targetRow, sourceCell.CellReference.Value);
-                targetCell.StyleIndex = sourceCell.StyleIndex == null ? null : new UInt32Value(sourceCell.StyleIndex.Value);
-            }
-        }
-    }
-
-    private static void CopyRowFormatting(Row sourceRow, Row targetRow)
-    {
-        targetRow.Height = sourceRow.Height == null ? null : new DoubleValue(sourceRow.Height.Value);
-        targetRow.CustomHeight = sourceRow.CustomHeight == null ? null : new BooleanValue(sourceRow.CustomHeight.Value);
-        targetRow.StyleIndex = sourceRow.StyleIndex == null ? null : new UInt32Value(sourceRow.StyleIndex.Value);
-        targetRow.CustomFormat = sourceRow.CustomFormat == null ? null : new BooleanValue(sourceRow.CustomFormat.Value);
-        targetRow.Hidden = sourceRow.Hidden == null ? null : new BooleanValue(sourceRow.Hidden.Value);
-        targetRow.OutlineLevel = sourceRow.OutlineLevel == null ? null : new ByteValue(sourceRow.OutlineLevel.Value);
-        targetRow.Collapsed = sourceRow.Collapsed == null ? null : new BooleanValue(sourceRow.Collapsed.Value);
-        targetRow.ThickTop = sourceRow.ThickTop == null ? null : new BooleanValue(sourceRow.ThickTop.Value);
-        targetRow.ThickBot = sourceRow.ThickBot == null ? null : new BooleanValue(sourceRow.ThickBot.Value);
-    }
-
-    private static Row GetOrCreateRow(SheetData sheetData, uint rowIndex)
-    {
-        var row = sheetData.Elements<Row>().FirstOrDefault(item => item.RowIndex?.Value == rowIndex);
-        if (row != null)
-        {
-            return row;
-        }
-
-        row = new Row { RowIndex = rowIndex };
-        var nextRow = sheetData.Elements<Row>().FirstOrDefault(item => item.RowIndex?.Value > rowIndex);
-        if (nextRow != null)
-        {
-            sheetData.InsertBefore(row, nextRow);
-        }
-        else
-        {
-            sheetData.Append(row);
-        }
-
-        return row;
-    }
-
-    private static Cell GetOrCreateCell(Row row, string cellReference)
-    {
-        var cell = row.Elements<Cell>().FirstOrDefault(item => item.CellReference?.Value == cellReference);
-        if (cell != null)
-        {
-            return cell;
-        }
-
-        cell = new Cell { CellReference = cellReference };
-        var targetColumn = GetColumnName(cellReference);
-        var nextCell = row.Elements<Cell>()
-            .FirstOrDefault(item => string.Compare(GetColumnName(item.CellReference?.Value ?? string.Empty), targetColumn, StringComparison.Ordinal) > 0);
-        if (nextCell != null)
-        {
-            row.InsertBefore(cell, nextCell);
-        }
-        else
-        {
-            row.Append(cell);
-        }
-
-        return cell;
-    }
-
-    private static string GetColumnName(string cellReference)
-    {
-        return Regex.Replace(cellReference, @"\d", string.Empty);
     }
 
     private void BuildAttendanceTemplate(
@@ -452,19 +95,7 @@ public sealed class TemplateWriter
             sheet.Range(2, col, 3, col).Merge();
         }
 
-        var employees = attendanceRecords
-            .Select((record, index) => new { Record = record, Index = index })
-            .GroupBy(item => AttendanceRuleEngine.CleanName(item.Record.Name))
-            .OrderBy(g => g.Min(item => item.Index))
-            .Select(g => g.First().Record)
-            .GroupBy(r => AttendanceRuleEngine.CleanName(r.Name))
-            .Select(g => new
-            {
-                Name = g.Key,
-                Department = g.Select(r => r.Department).FirstOrDefault(d => !string.IsNullOrWhiteSpace(d)) ?? string.Empty,
-            })
-            .Where(e => !string.IsNullOrWhiteSpace(e.Name))
-            .ToList();
+        var employees = GetEmployeeTemplateRows(month, attendanceRecords);
 
         var row = 4;
         foreach (var employee in employees)
@@ -472,16 +103,40 @@ public sealed class TemplateWriter
             sheet.Cell(row, 1).FormulaA1 = $"ROW()-3";
             sheet.Cell(row, 2).Value = employee.Name;
             sheet.Cell(row, 3).Value = employee.Department;
+            sheet.Cell(row, 47).Value = employee.Remark;
             sheet.Row(row).Height = 34;
             row++;
         }
 
         var totalRow = row;
-        sheet.Cell(totalRow, 2).Value = "合计";
-        sheet.Range(totalRow, 35, totalRow, 36).Merge();
-        sheet.Cell(totalRow, 35).FormulaA1 = $"SUM(AI4:AI{totalRow - 1})";
+        for (var col = 35; col <= 46; col++)
+        {
+            sheet.Cell(totalRow, col).FormulaA1 = $"SUM({sheet.Cell(4, col).Address.ToStringRelative()}:"
+                + $"{sheet.Cell(totalRow - 1, col).Address.ToStringRelative()})";
+        }
 
-        ApplyAttendanceStyle(sheet, totalRow);
+        sheet.Cell(totalRow + 3, 1).Value = "编制： 肖玲玲                          审查：                                        审核：";
+        sheet.Cell(totalRow + 6, 21).Value = "事假";
+        sheet.Cell(totalRow + 6, 22).Value = "调休";
+        sheet.Cell(totalRow + 6, 23).Value = "年假";
+        ApplyAttendanceStyle(sheet, totalRow + 6);
+    }
+
+
+    private static List<EmployeeTemplateRow> GetEmployeeTemplateRows(YearMonth month, IReadOnlyList<AttendanceRecord> attendanceRecords)
+    {
+        return attendanceRecords
+            .Select((record, index) => new { Record = record, Index = index })
+            .GroupBy(item => AttendanceRuleEngine.CleanName(item.Record.Name))
+            .OrderBy(g => g.Min(item => item.Index))
+            .Select(g => g.First().Record)
+            .GroupBy(r => AttendanceRuleEngine.CleanName(r.Name))
+            .Select(g => new EmployeeTemplateRow(
+                g.Key,
+                g.Select(r => r.Department).FirstOrDefault(d => !string.IsNullOrWhiteSpace(d)) ?? string.Empty,
+                string.Empty))
+            .Where(e => !string.IsNullOrWhiteSpace(e.Name))
+            .ToList();
     }
 
     private static void ApplyAttendanceStyle(IXLWorksheet sheet, int lastRow)
@@ -489,17 +144,33 @@ public sealed class TemplateWriter
         sheet.Row(1).Height = 31;
         sheet.Row(2).Height = 23;
         sheet.Row(3).Height = 39;
-        sheet.Column(1).Width = 3.54;
-        sheet.Column(2).Width = 7.61;
-        sheet.Column(3).Width = 13;
+        SetSavedColumnWidth(sheet, 1, 3.54166666666667);
+        SetSavedColumnWidth(sheet, 2, 7.60833333333333);
+        SetSavedColumnWidth(sheet, 3, 13);
         for (var col = 4; col <= 34; col++)
         {
-            sheet.Column(col).Width = col is 4 or 5 ? 5.25 : 13;
+            SetSavedColumnWidth(sheet, col, col is 4 or 5 ? 5.25 : 13);
         }
 
-        for (var col = 35; col <= 47; col++)
+        var statWidths = new Dictionary<int, double>
         {
-            sheet.Column(col).Width = col == 47 ? 18 : 8.5;
+            [35] = 7.34166666666667,
+            [36] = 7.65833333333333,
+            [37] = 6.71666666666667,
+            [38] = 6.8,
+            [39] = 8.275,
+            [40] = 6.80833333333333,
+            [41] = 6.1,
+            [42] = 13,
+            [43] = 6.51666666666667,
+            [44] = 13,
+            [45] = 6.525,
+            [46] = 10.4083333333333,
+            [47] = 18.5
+        };
+        foreach (var (col, width) in statWidths)
+        {
+            SetSavedColumnWidth(sheet, col, width);
         }
 
         var all = sheet.Range(1, 1, lastRow, 47);
@@ -510,13 +181,19 @@ public sealed class TemplateWriter
         all.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
         all.Style.Border.InsideBorder = XLBorderStyleValues.Thin;
 
-        sheet.Cell(1, 1).Style.Font.Bold = true;
+        sheet.Cell(1, 1).Style.Font.Bold = false;
         sheet.Cell(1, 1).Style.Font.FontSize = 16;
         sheet.Range(2, 4, 2, 34).Style.Fill.BackgroundColor = XLColor.FromHtml("#33CCCC");
         sheet.Range(2, 4, 2, 34).Style.DateFormat.Format = "d\"A\"";
-        sheet.Range(2, 35, 3, 47).Style.Fill.BackgroundColor = XLColor.FromHtml("#33CCCC");
+        sheet.Range(3, 4, 3, 34).Style.Fill.BackgroundColor = XLColor.White;
+        sheet.Range(2, 35, 3, 47).Style.Fill.BackgroundColor = XLColor.NoColor;
         sheet.SheetView.FreezeRows(3);
         sheet.SheetView.FreezeColumns(3);
+    }
+
+    private static void SetSavedColumnWidth(IXLWorksheet sheet, int column, double targetWidth)
+    {
+        sheet.Column(column).Width = Math.Max(0, targetWidth - 0.710625);
     }
 
     private void BuildOvertimeTemplate(XLWorkbook workbook, YearMonth month, IReadOnlyList<OvertimeRecord> overtimeRecords)
@@ -539,21 +216,29 @@ public sealed class TemplateWriter
         sheet.Cell(2, 42).Value = "周末加班";
         sheet.Cell(2, 44).Value = "姓名";
         sheet.Cell(2, 45).Value = "法定加班";
+        sheet.Cell(2, 48).Value = "平时验证";
+        sheet.Cell(2, 50).Value = "周末验证";
+        sheet.Cell(2, 52).Value = "法定验证";
 
-        var names = overtimeRecords
-            .Select(r => AttendanceRuleEngine.CleanName(r.Name))
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(name => name, StringComparer.Ordinal)
-            .ToList();
+        var rows = GetOvertimeTemplateRows(month, overtimeRecords);
         var row = 3;
-        foreach (var name in names)
+        foreach (var item in rows)
         {
-            AddOvertimeRow(sheet, row++, name, 25, false);
-            AddOvertimeRow(sheet, row++, $"{name}2", 40, true);
+            if (item.Name == "合计")
+            {
+                AddOvertimeTotalRow(sheet, row++);
+                continue;
+            }
+
+            AddOvertimeRow(sheet, row++, item.Name, item.Standard, item.Name.EndsWith('2'));
         }
 
-        ApplyOvertimeStyle(sheet, Math.Max(3, row - 1));
+        sheet.Cell(row, 44).FormulaA1 = $"AM{row - 1}+AP{row - 1}+AS{row - 1}";
+        sheet.Cell(row, 50).FormulaA1 = $"AV{row - 1}+AX{row - 1}+AZ{row - 1}";
+        sheet.Cell(row + 1, 1).Value = "  编制： 肖玲玲                                                                审核：";
+        sheet.Cell(row + 1, 44).FormulaA1 = $"AR{row}-AI{row - 1}";
+        sheet.Cell(row + 1, 48).FormulaA1 = $"(AV{row - 1}+AX{row - 1}+AZ{row - 1})+AI{row - 1}";
+        ApplyOvertimeStyle(sheet, Math.Max(3, row + 1));
     }
 
     private static void AddOvertimeRow(IXLWorksheet sheet, int row, string name, decimal standard, bool restRow)
@@ -565,25 +250,109 @@ public sealed class TemplateWriter
         if (restRow)
         {
             sheet.Cell(row, 1).Style.Fill.BackgroundColor = XLColor.Yellow;
+            var baseName = name[..^1];
+            sheet.Cell(row, 41).Value = baseName;
+            sheet.Cell(row, 42).FormulaA1 = $"AI{row}";
+            sheet.Cell(row, 50).FormulaA1 = $"AP{row}-AI{row}";
+            sheet.Cell(row, 38).Style.Fill.BackgroundColor = XLColor.Yellow;
+            sheet.Cell(row, 41).Style.Fill.BackgroundColor = XLColor.Yellow;
         }
         else
         {
             sheet.Cell(row, 38).Value = name;
             sheet.Cell(row, 39).FormulaA1 = $"AI{row}";
+            sheet.Cell(row, 48).FormulaA1 = $"AM{row}-AI{row}";
         }
+    }
+
+    private static void AddOvertimeTotalRow(IXLWorksheet sheet, int row)
+    {
+        sheet.Cell(row, 1).Value = "合计";
+        for (var col = 2; col <= 35; col++)
+        {
+            sheet.Cell(row, col).FormulaA1 = $"SUM({sheet.Cell(3, col).Address.ToStringRelative()}:{sheet.Cell(row - 1, col).Address.ToStringRelative()})";
+        }
+
+        sheet.Cell(row, 33).FormulaA1 = $"SUM(B{row}:AF{row})";
+        sheet.Cell(row, 34).Value = "/";
+        sheet.Cell(row, 38).Value = "合计";
+        sheet.Cell(row, 39).FormulaA1 = $"SUM(AM3:AM{row - 1})";
+        sheet.Cell(row, 41).Value = "合计";
+        sheet.Cell(row, 42).FormulaA1 = $"SUM(AP3:AP{row - 1})";
+        sheet.Cell(row, 44).Value = "合计";
+        sheet.Cell(row, 45).FormulaA1 = $"SUM(AS3:AS{row - 1})";
+        sheet.Cell(row, 48).FormulaA1 = $"SUM(AV3:AV{row - 1})";
+        sheet.Cell(row, 50).FormulaA1 = $"SUM(AX3:AX{row - 1})";
+        sheet.Cell(row, 52).FormulaA1 = $"SUM(AZ3:AZ{row - 1})";
+    }
+
+    private List<OvertimeTemplateRow> GetOvertimeTemplateRows(YearMonth month, IReadOnlyList<OvertimeRecord> overtimeRecords)
+    {
+        return overtimeRecords
+            .Select((record, index) => new { Record = record, Index = index, Name = AttendanceRuleEngine.CleanName(record.Name) })
+            .Where(item => !string.IsNullOrWhiteSpace(item.Name))
+            .GroupBy(item => item.Name, StringComparer.Ordinal)
+            .OrderBy(group => group.Min(item => item.Index))
+            .SelectMany(group =>
+            {
+                var hasWorkdayOvertime = group.Any(item => !IsCalendarRestDay(item.Record.Date));
+                var hasRestdayOvertime = group.Any(item => IsCalendarRestDay(item.Record.Date));
+                var rows = new List<OvertimeTemplateRow>();
+                if (hasWorkdayOvertime || !hasRestdayOvertime)
+                {
+                    rows.Add(new OvertimeTemplateRow(group.Key, 25));
+                }
+
+                if (hasRestdayOvertime)
+                {
+                    rows.Add(new OvertimeTemplateRow($"{group.Key}2", 40));
+                }
+
+                return rows;
+            })
+            .Append(new OvertimeTemplateRow("合计", 0))
+            .ToList();
     }
 
     private static void ApplyOvertimeStyle(IXLWorksheet sheet, int lastRow)
     {
         sheet.Row(1).Height = 47;
-        sheet.Column(1).Width = 14.37;
-        sheet.Column(2).Width = 7.34;
-        for (var col = 3; col <= 35; col++)
+        SetSavedColumnWidth(sheet, 1, 14.3666666666667);
+        SetSavedColumnWidth(sheet, 2, 7.34166666666667);
+        for (var col = 3; col <= 32; col++)
         {
-            sheet.Column(col).Width = 13;
+            SetSavedColumnWidth(sheet, col, 13);
+        }
+        var widths = new Dictionary<int, double>
+        {
+            [33] = 10.1583333333333,
+            [34] = 8.74166666666667,
+            [35] = 15,
+            [36] = 9,
+            [37] = 13,
+            [38] = 14.3666666666667,
+            [39] = 11.8916666666667,
+            [40] = 9,
+            [41] = 14.3666666666667,
+            [42] = 11.8833333333333,
+            [43] = 9,
+            [44] = 13.4333333333333,
+            [45] = 10.3833333333333,
+            [46] = 9.38333333333333,
+            [47] = 9,
+            [48] = 12.9583333333333,
+            [49] = 9,
+            [50] = 10.3833333333333,
+            [51] = 9,
+            [52] = 10.3833333333333,
+            [53] = 9
+        };
+        foreach (var (col, width) in widths)
+        {
+            SetSavedColumnWidth(sheet, col, width);
         }
 
-        for (var row = 3; row <= lastRow; row++)
+        for (var row = 3; row <= Math.Min(lastRow, 129); row++)
         {
             sheet.Row(row).Height = 44;
         }
@@ -595,15 +364,33 @@ public sealed class TemplateWriter
         all.Style.Alignment.WrapText = true;
         all.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
         all.Style.Border.InsideBorder = XLBorderStyleValues.Thin;
-        sheet.Cell(1, 1).Style.Font.Bold = true;
-        sheet.Cell(1, 1).Style.Font.FontSize = 16;
+        sheet.Cell(1, 1).Style.Font.Bold = false;
+        sheet.Cell(1, 1).Style.Font.FontSize = 22;
+        foreach (var address in new[] { "A1", "AF1", "AG1", "AI1", "AL1", "AO1" })
+        {
+            sheet.Cell(address).Style.Fill.BackgroundColor = XLColor.FromTheme(XLThemeColor.Background1);
+        }
         sheet.Range(2, 2, 2, 32).Style.DateFormat.Format = "d";
         sheet.Range(2, 2, 2, 6).Style.Fill.BackgroundColor = XLColor.FromHtml("#FFC000");
+        sheet.Range(2, 11, 2, 11).Style.Fill.BackgroundColor = XLColor.FromHtml("#FFC000");
+        sheet.Range(2, 17, 2, 18).Style.Fill.BackgroundColor = XLColor.FromHtml("#FFC000");
+        sheet.Range(2, 24, 2, 25).Style.Fill.BackgroundColor = XLColor.FromHtml("#FFC000");
+        sheet.Range(2, 31, 2, 32).Style.Fill.BackgroundColor = XLColor.FromHtml("#FFC000");
+        foreach (var row in sheet.Rows(3, lastRow))
+        {
+            var name = AttendanceReader.CellText(row.Cell(1));
+            if (name.EndsWith('2'))
+            {
+                row.Cell(1).Style.Fill.BackgroundColor = XLColor.Yellow;
+                row.Cell(38).Style.Fill.BackgroundColor = XLColor.Yellow;
+                row.Cell(41).Style.Fill.BackgroundColor = XLColor.Yellow;
+            }
+        }
         sheet.SheetView.FreezeRows(2);
         sheet.SheetView.FreezeColumns(1);
     }
 
-    private static void BuildNightShiftTemplate(XLWorkbook workbook, YearMonth month)
+    private static void BuildNightShiftTemplate(XLWorkbook workbook, YearMonth month, IReadOnlyList<AttendanceRecord> attendanceRecords)
     {
         var sheet = workbook.Worksheets.Add("夜班补贴");
         sheet.Range("A1:K1").Merge();
@@ -615,15 +402,61 @@ public sealed class TemplateWriter
             sheet.Cell(day + 2, 1).Value = new DateOnly(month.Year, month.Month, day).ToDateTime(TimeOnly.MinValue);
         }
 
-        sheet.Row(1).Height = 49;
-        sheet.Row(2).Height = 69;
-        sheet.Column(1).Width = 22.14;
-        for (var col = 2; col <= 40; col++)
+        var nightRecords = attendanceRecords
+            .Select((record, index) => new { Record = record, Index = index, Name = AttendanceRuleEngine.CleanName(record.Name) })
+            .Where(item => !string.IsNullOrWhiteSpace(item.Name)
+                && (item.Record.NormalizedStatus.Contains("中班", StringComparison.Ordinal)
+                    || item.Record.NormalizedStatus.Contains("夜班", StringComparison.Ordinal)))
+            .GroupBy(item => item.Name, StringComparer.Ordinal)
+            .OrderBy(group => group.Min(item => item.Index))
+            .ToList();
+
+        for (var index = 0; index < nightRecords.Count; index++)
         {
-            sheet.Column(col).Width = 16.07;
+            sheet.Cell(2, index + 2).Value = nightRecords[index].Key;
+            foreach (var item in nightRecords[index])
+            {
+                if (item.Record.Date.Year == month.Year && item.Record.Date.Month == month.Month)
+                {
+                    sheet.Cell(item.Record.Date.Day + 2, index + 2).Value = item.Record.NormalizedStatus.Contains("夜班", StringComparison.Ordinal)
+                        ? "夜班"
+                        : "中班";
+                }
+            }
         }
 
-        var all = sheet.Range(1, 1, days + 2, 40);
+        var summaryStartRow = days + 3;
+        var lastSummaryColumn = Math.Max(11, nightRecords.Count + 1);
+        for (var col = 2; col <= lastSummaryColumn; col++)
+        {
+            sheet.Cell(summaryStartRow, col).Value = 150;
+            sheet.Cell(summaryStartRow + 1, col).FormulaA1 = $"COUNTIF({sheet.Cell(3, col).Address.ToStringRelative()}:{sheet.Cell(days + 2, col).Address.ToStringRelative()},\"夜班\")+"
+                + $"COUNTIF({sheet.Cell(3, col).Address.ToStringRelative()}:{sheet.Cell(days + 2, col).Address.ToStringRelative()},\"中班\")";
+            sheet.Cell(summaryStartRow + 2, col).FormulaA1 = $"{sheet.Cell(summaryStartRow, col).Address.ToStringRelative()}*{sheet.Cell(summaryStartRow + 1, col).Address.ToStringRelative()}";
+        }
+
+        sheet.Cell(summaryStartRow, 1).Value = "标准";
+        sheet.Cell(summaryStartRow + 1, 1).Value = "合计天数";
+        sheet.Cell(summaryStartRow + 2, 1).Value = "合计补贴";
+        sheet.Cell(summaryStartRow + 3, 1).Value = "总计";
+        sheet.Cell(summaryStartRow + 3, lastSummaryColumn).FormulaA1 = $"SUM(B{summaryStartRow + 2}:{sheet.Cell(summaryStartRow + 2, lastSummaryColumn).Address.ToStringRelative()})";
+        sheet.Cell(summaryStartRow + 5, 1).Value = "  编制：肖玲玲                                                          审核：";
+
+        var lastStyledRow = summaryStartRow + 5;
+        var lastStyledColumn = Math.Max(40, nightRecords.Count + 1);
+        sheet.Row(1).Height = 49;
+        sheet.Row(2).Height = 69;
+        SetSavedColumnWidth(sheet, 1, 22.1416666666667);
+        for (var col = 2; col <= lastStyledColumn; col++)
+        {
+            SetSavedColumnWidth(sheet, col, 13);
+        }
+        SetSavedColumnWidth(sheet, 2, 16.0666666666667);
+        SetSavedColumnWidth(sheet, 3, 16.0666666666667);
+        SetSavedColumnWidth(sheet, 17, 18.3916666666667);
+        SetSavedColumnWidth(sheet, 20, 16.9583333333333);
+
+        var all = sheet.Range(1, 1, lastStyledRow, lastStyledColumn);
         all.Style.Font.FontName = "宋体";
         all.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
         all.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
@@ -631,9 +464,16 @@ public sealed class TemplateWriter
         all.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
         all.Style.Border.InsideBorder = XLBorderStyleValues.Thin;
         sheet.Cell(1, 1).Style.Font.Bold = true;
-        sheet.Cell(1, 1).Style.Font.FontSize = 16;
+        sheet.Cell(1, 1).Style.Font.FontSize = 28;
         sheet.Range(3, 1, days + 2, 1).Style.DateFormat.Format = "m/d";
-        sheet.Range(3, 1, Math.Min(7, days + 2), 1).Style.Fill.BackgroundColor = XLColor.FromHtml("#FFC000");
+        for (var day = 1; day <= days; day++)
+        {
+            var date = new DateOnly(month.Year, month.Month, day);
+            if (date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+            {
+                sheet.Cell(day + 2, 1).Style.Fill.BackgroundColor = XLColor.FromHtml("#FFC000");
+            }
+        }
     }
 
     private void WriteAttendance(XLWorkbook workbook, YearMonth month, IReadOnlySet<DateOnly> selectedHolidays, IReadOnlyList<AttendanceRecord> records, IReadOnlyList<AttendanceException> exceptions)
@@ -652,6 +492,10 @@ public sealed class TemplateWriter
         var byNameDate = records
             .GroupBy(r => (AttendanceRuleEngine.CleanName(r.Name), r.Date))
             .ToDictionary(g => g.Key, g => PickStatus(g.Select(r => r.NormalizedStatus)));
+        var exceptionsByName = exceptions
+            .Where(e => !string.IsNullOrWhiteSpace(e.Name))
+            .GroupBy(e => AttendanceRuleEngine.CleanName(e.Name))
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
         var used = sheet.RangeUsed()!;
         var days = DateTime.DaysInMonth(month.Year, month.Month);
         var written = 0;
@@ -698,6 +542,7 @@ public sealed class TemplateWriter
                 }
 
                 cell.Value = status;
+                ApplyAttendanceStatusFill(cell, status);
                 statuses[day] = status;
                 written++;
             }
@@ -710,10 +555,47 @@ public sealed class TemplateWriter
             {
                 ClearStatistics(row, layout);
             }
+
+            if (exceptionsByName.TryGetValue(name, out var rowExceptions))
+            {
+                WriteReviewNote(row, layout, rowExceptions);
+            }
         }
 
         WriteTotalRow(sheet, layout, employeeRows);
+        SetSavedColumnWidth(sheet, 4, 5.25);
+        SetSavedColumnWidth(sheet, 5, 5.25);
         _log($"已写入考勤主表“{sheet.Name}”：{written} 个日期单元格。");
+    }
+
+    private static void WriteReviewNote(IXLRow row, AttendanceLayout layout, IReadOnlyList<AttendanceException> exceptions)
+    {
+        var remarkColumn = layout.StatColumns.FirstOrDefault(s => s.Key.Contains("备注", StringComparison.Ordinal)).Value;
+        if (remarkColumn <= 0 || exceptions.Count == 0)
+        {
+            return;
+        }
+
+        var noteParts = exceptions
+            .Take(2)
+            .Select(e =>
+            {
+                var date = e.Date.HasValue ? $"{e.Date.Value.Month}/{e.Date.Value.Day} " : string.Empty;
+                var raw = string.IsNullOrWhiteSpace(e.RawStatus) ? string.Empty : $"{e.RawStatus} ";
+                return $"{date}{raw}{e.Reason}".Trim();
+            })
+            .Where(text => !string.IsNullOrWhiteSpace(text))
+            .ToList();
+        if (exceptions.Count > noteParts.Count)
+        {
+            noteParts.Add($"另{exceptions.Count - noteParts.Count}条见异常明细");
+        }
+
+        var existing = AttendanceReader.CellText(row.Cell(remarkColumn));
+        var note = $"需复核：{string.Join("；", noteParts)}";
+        row.Cell(remarkColumn).Value = string.IsNullOrWhiteSpace(existing)
+            ? note
+            : $"{existing}；{note}";
     }
 
     private void WriteOvertime(XLWorkbook workbook, YearMonth month, IReadOnlyList<OvertimeRecord> records)
@@ -747,7 +629,6 @@ public sealed class TemplateWriter
             return;
         }
 
-        var preserveExistingRows = IsSameOvertimeMonth(headerRow, dateColumns, month);
         RewriteOvertimeDateHeaders(sheet, headerRow, dateColumns, month);
         var nameColumn = Math.Max(1, dateColumns.Values.Min() - 1);
         var byNameDate = records
@@ -764,11 +645,6 @@ public sealed class TemplateWriter
             var originalName = AttendanceReader.CellText(row.Cell(nameColumn));
             var name = AttendanceRuleEngine.CleanName(originalName);
             if (string.IsNullOrWhiteSpace(name) || !ContainsChinese(name) || IsOvertimeTotalRow(name))
-            {
-                continue;
-            }
-
-            if (preserveExistingRows && (IsManualOvertimeRow(row) || HasExistingOvertimeValues(row, dateColumns.Values)))
             {
                 continue;
             }
@@ -811,25 +687,6 @@ public sealed class TemplateWriter
     private static bool IsOvertimeTotalRow(string name)
     {
         return name.Contains("合计", StringComparison.Ordinal) || name.Contains("总计", StringComparison.Ordinal);
-    }
-
-    private static bool IsSameOvertimeMonth(IXLRow headerRow, Dictionary<int, int> dateColumns, YearMonth month)
-    {
-        return dateColumns.Values
-            .Select(col => AttendanceReader.TryGetDate(headerRow.Cell(col)))
-            .Any(date => date.HasValue && date.Value.Year == month.Year && date.Value.Month == month.Month);
-    }
-
-    private static bool HasExistingOvertimeValues(IXLRow row, IEnumerable<int> dateColumns)
-    {
-        return dateColumns.Any(col => !string.IsNullOrWhiteSpace(AttendanceReader.CellText(row.Cell(col))));
-    }
-
-    private static bool IsManualOvertimeRow(IXLRow row)
-    {
-        var standardText = AttendanceReader.CellText(row.Cell(34));
-        return decimal.TryParse(standardText, NumberStyles.Any, CultureInfo.CurrentCulture, out var standard)
-            && Math.Abs(standard - 21.72m) < 0.005m;
     }
 
     private static IXLWorksheet? FindAttendanceSheet(XLWorkbook workbook, YearMonth month)
@@ -944,8 +801,8 @@ public sealed class TemplateWriter
         }
 
         var days = DateTime.DaysInMonth(month.Year, month.Month);
-        sheet.Column(layout.DateStartColumn).Width = 5.25;
-        sheet.Column(layout.DateStartColumn + 1).Width = 5.25;
+        SetSavedColumnWidth(sheet, layout.DateStartColumn, 5.25);
+        SetSavedColumnWidth(sheet, layout.DateStartColumn + 1, 5.25);
         for (var day = 1; day <= layout.DateColumnCount; day++)
         {
             var headerCell = sheet.Cell(layout.DateHeaderRow, layout.DateStartColumn + day - 1);
@@ -1042,8 +899,8 @@ public sealed class TemplateWriter
             titleCell.Value = Regex.Replace(title, @"\d{4}年\d{1,2}月", $"{month.Year}年{month.Month}月");
         }
 
-        sheet.Column(2).Width = 16.0666666666667;
-        sheet.Column(3).Width = 16.0666666666667;
+        SetSavedColumnWidth(sheet, 2, 16.0666666666667);
+        SetSavedColumnWidth(sheet, 3, 16.0666666666667);
 
         var dateRows = sheet.RowsUsed()
             .Where(row => AttendanceReader.TryGetDate(row.Cell(1)).HasValue)
@@ -1215,6 +1072,56 @@ public sealed class TemplateWriter
             || existing.Contains("丧假", StringComparison.Ordinal)
             || existing.Contains("陪产假", StringComparison.Ordinal)
             || existing.Contains("例假", StringComparison.Ordinal);
+    }
+
+    private static void ApplyAttendanceStatusFill(IXLCell cell, string status)
+    {
+        if (status == "/")
+        {
+            cell.Style.Fill.BackgroundColor = XLColor.NoColor;
+            return;
+        }
+
+        if (status == "休" || status == "法定")
+        {
+            cell.Style.Fill.BackgroundColor = XLColor.FromTheme(XLThemeColor.Background1);
+            return;
+        }
+
+        if (status == "公司出勤")
+        {
+            cell.Style.Fill.BackgroundColor = XLColor.FromTheme(XLThemeColor.Accent5);
+            return;
+        }
+
+        if (status.Contains("中班", StringComparison.Ordinal) || status.Contains("夜班", StringComparison.Ordinal))
+        {
+            cell.Style.Fill.BackgroundColor = XLColor.FromHtml("#FFC000");
+            return;
+        }
+
+        if (status.Contains("产假", StringComparison.Ordinal))
+        {
+            cell.Style.Fill.BackgroundColor = XLColor.Yellow;
+            return;
+        }
+
+        if (status.Contains("年假", StringComparison.Ordinal))
+        {
+            cell.Style.Fill.BackgroundColor = XLColor.FromTheme(XLThemeColor.Accent1);
+            return;
+        }
+
+        if (status.Contains("调休", StringComparison.Ordinal) && !status.Contains("请假", StringComparison.Ordinal))
+        {
+            cell.Style.Fill.BackgroundColor = XLColor.FromTheme(XLThemeColor.Accent6);
+            return;
+        }
+
+        if (status.Contains("假", StringComparison.Ordinal) || status.Contains("请假", StringComparison.Ordinal))
+        {
+            cell.Style.Fill.BackgroundColor = XLColor.FromTheme(XLThemeColor.Accent2);
+        }
     }
 
     private static bool IsOutOfEmployment(IXLRow row, AttendanceLayout layout, DateOnly date)
