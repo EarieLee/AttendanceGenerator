@@ -1,4 +1,4 @@
-using ClosedXML.Excel;
+﻿using ClosedXML.Excel;
 
 namespace AttendanceGenerator.Services;
 
@@ -31,8 +31,12 @@ internal static class CommandLineRunner
             return Usage(log);
         }
 
-        var holidays = args.Length >= 6 ? ParseDates(args[5]) : [];
-        var templatePath = args.Length >= 7 ? args[6] : null;
+        var holidays = args.Length >= 6 && !LooksLikeTemplatePath(args[5]) ? ParseDates(args[5]) : null;
+        var templatePath = args.Length >= 7
+            ? args[6]
+            : args.Length >= 6 && LooksLikeTemplatePath(args[5])
+                ? args[5]
+                : null;
         var service = new GenerationService(log);
         var output = service.Generate(args[1], args[2], args[3], args[4], holidays, templatePath);
         log(output);
@@ -103,6 +107,12 @@ internal static class CommandLineRunner
         return value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(item => DateOnly.Parse(item, System.Globalization.CultureInfo.InvariantCulture))
             .ToList();
+    }
+
+    private static bool LooksLikeTemplatePath(string value)
+    {
+        return value.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase)
+            || File.Exists(value);
     }
 
     private static IXLWorksheet? FindAttendanceSheet(XLWorkbook workbook, string? preferredName = null)

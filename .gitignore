@@ -12,4 +12,5 @@ Logs/*.log
 
 # Local test outputs
 out/
+out*/
 *.tmp

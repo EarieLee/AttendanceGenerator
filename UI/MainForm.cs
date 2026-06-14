@@ -89,9 +89,11 @@ public sealed partial class MainForm : Form
 
         holidayCheckedListBox.Items.Clear();
         var days = DateTime.DaysInMonth(month.Year, month.Month);
+        var defaultHolidays = AttendanceRuleEngine.GetDefaultHolidayCandidates(month.Year);
         for (var day = 1; day <= days; day++)
         {
-            holidayCheckedListBox.Items.Add(new HolidayListItem(new DateOnly(month.Year, month.Month, day)), false);
+            var date = new DateOnly(month.Year, month.Month, day);
+            holidayCheckedListBox.Items.Add(new HolidayListItem(date), defaultHolidays.Contains(date));
         }
     }
 

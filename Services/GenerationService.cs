@@ -28,8 +28,15 @@ public sealed class GenerationService
 
         Directory.CreateDirectory(outputDirectory);
         var month = YearMonth.Parse(monthText);
+        var effectiveHolidays = selectedHolidays?.ToHashSet()
+            ?? AttendanceRuleEngine.GetDefaultHolidayCandidates(month.Year)
+                .Where(date => date.Year == month.Year && date.Month == month.Month)
+                .ToHashSet();
         templatePath = ResolveTemplatePath(templatePath, attendancePath, overtimePath, outputDirectory);
-        ValidateFile(templatePath, "模板文件");
+        if (!string.IsNullOrWhiteSpace(templatePath))
+        {
+            ValidateFile(templatePath, "模板文件");
+        }
         var outputPath = Path.Combine(outputDirectory, $"{month.Year}年{month.Month:D2}月考勤统计表_生成版.xlsx");
         var appDirectory = AppContext.BaseDirectory;
         var configDirectory = Path.Combine(appDirectory, "Config");
@@ -47,19 +54,19 @@ public sealed class GenerationService
 
         LogAll("开始生成考勤统计表。");
         var exceptions = new List<AttendanceException>();
-        var ruleEngine = new AttendanceRuleEngine(configDirectory, LogAll, selectedHolidays);
+        var ruleEngine = new AttendanceRuleEngine(configDirectory, LogAll, effectiveHolidays);
         var attendanceReader = new AttendanceReader(ruleEngine, LogAll);
         var overtimeReader = new OvertimeReader(LogAll);
         var writer = new TemplateWriter(LogAll, configDirectory);
 
         var attendance = attendanceReader.Read(attendancePath, month, exceptions);
         var overtime = overtimeReader.Read(overtimePath, month, exceptions);
-        writer.Generate(templatePath, outputPath, month, selectedHolidays?.ToHashSet() ?? [], attendance, overtime, exceptions);
+        writer.Generate(templatePath, outputPath, month, effectiveHolidays, attendance, overtime, exceptions);
         LogAll($"生成成功：{outputPath}");
         return outputPath;
     }
 
-    private static string ResolveTemplatePath(string? templatePath, string attendancePath, string overtimePath, string outputDirectory)
+    private static string? ResolveTemplatePath(string? templatePath, string attendancePath, string overtimePath, string outputDirectory)
     {
         if (!string.IsNullOrWhiteSpace(templatePath))
         {
@@ -112,7 +119,7 @@ public sealed class GenerationService
             }
         }
 
-        throw new FileNotFoundException("未选择模板文件，且未能自动找到“考勤统计模板.xlsx”或类似“考勤统计表.xlsx”的模板。");
+        return null;
     }
 
     private static void ValidateFile(string path, string displayName)

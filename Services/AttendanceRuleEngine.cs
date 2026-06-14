@@ -93,6 +93,10 @@ public sealed partial class AttendanceRuleEngine
             return "旷工";
         }
 
+        // Detect shift from raw status (e.g., "4班次17点")
+        var shift = DetectShiftFromRaw(raw);
+        if (!string.IsNullOrWhiteSpace(shift)) return shift;
+
         if (raw.Contains("外出", StringComparison.Ordinal)
             || raw.Contains("出差", StringComparison.Ordinal)
             || raw.Contains("不在考勤组并打卡", StringComparison.Ordinal))
@@ -116,6 +120,25 @@ public sealed partial class AttendanceRuleEngine
             Reason = "无法识别的考勤状态"
         });
         return raw;
+    }
+
+    
+
+    private static string DetectShiftFromRaw(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        
+        // Match shift patterns like "4班次17点", "5班次21点30分"
+        var match = Regex.Match(raw, @"(\d+)班次(\d{1,2})点");
+        if (!match.Success) return "";
+        
+        var hour = int.Parse(match.Groups[2].Value);
+        // 中班: shift start 16:00-19:59
+        if (hour >= 16 && hour < 20) return "中班";
+        // 夜班: shift start 20:00-23:59
+        if (hour >= 20) return "夜班";
+        
+        return "";
     }
 
     public static string CleanName(string value)
@@ -300,7 +323,6 @@ public sealed partial class AttendanceRuleEngine
             new(year, 1, 1),
             new(year, 5, 1),
             new(year, 5, 2),
-            new(year, 5, 3),
             new(year, 10, 1),
             new(year, 10, 2),
             new(year, 10, 3),
