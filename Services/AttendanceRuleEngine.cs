@@ -94,7 +94,8 @@ public sealed partial class AttendanceRuleEngine
         }
 
         if (raw.Contains("外出", StringComparison.Ordinal)
-            || raw.Contains("出差", StringComparison.Ordinal))
+            || raw.Contains("出差", StringComparison.Ordinal)
+            || raw.Contains("不在考勤组并打卡", StringComparison.Ordinal))
         {
             return "公司出勤";
         }
